@@ -1,0 +1,49 @@
+# Relevé automatique des statistiques : chaque jour, GitHub lance stats-bunny.py, qui lit les journaux de Bunny,
+# met à jour les totaux (stats.json) et le rapport (index.html), puis les enregistre dans ce dépôt.
+# Le rapport s'affiche ensuite à l'adresse GitHub Pages du dépôt (Settings > Pages).
+#
+# Il faut avoir créé 3 « Secrets » dans Settings > Secrets and variables > Actions :
+#   BUNNY_API_KEY       la clé d'accès Bunny (Account settings > API Keys)
+#   BUNNY_PULLZONE_ID   le numéro de ta zone Bunny
+#   MAPT_STATS_SALT     un texte quelconque, long et secret (sert à rendre les empreintes de visiteurs irréversibles)
+name: Relevé des statistiques
+
+on:
+  schedule:
+    - cron: '17 4 * * *'      # tous les jours à 04h17 (heure UTC)
+  workflow_dispatch:          # permet aussi de le lancer à la main : onglet Actions > Run workflow
+
+permissions:
+  contents: write             # pour enregistrer les nouveaux totaux dans le dépôt
+
+concurrency:
+  group: releve-stats
+  cancel-in-progress: false
+
+jobs:
+  releve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Relever les journaux Bunny et fabriquer le rapport
+        env:
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+          BUNNY_PULLZONE_ID: ${{ secrets.BUNNY_PULLZONE_ID }}
+          MAPT_STATS_SALT: ${{ secrets.MAPT_STATS_SALT }}
+          MAPT_STATS_DIR: ${{ github.workspace }}
+          MAPT_REPORT_NAME: index.html
+        run: python3 stats-bunny.py --sans-ouvrir
+
+      - name: Enregistrer les nouveaux totaux
+        run: |
+          git config user.name "stats-bot"
+          git config user.email "stats-bot@users.noreply.github.com"
+          git add stats.json index.html
+          if git diff --cached --quiet; then
+            echo "Rien de nouveau."
+          else
+            git commit -m "Relevé du $(date -u +%F)"
+            git push origin HEAD
+          fi
