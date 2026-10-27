@@ -10,7 +10,7 @@ name: Relevé des statistiques
 
 on:
   schedule:
-       - cron: '47 5,13,21 * * *'        # tous les jours à 04h17 (heure UTC)
+       - cron: '47 5,13,21 * * *'        # 3 fois par jour : 05h47, 13h47 et 21h47 (heure UTC)
   workflow_dispatch:          # permet aussi de le lancer à la main : onglet Actions > Run workflow
 
 permissions:
