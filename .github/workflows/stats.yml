@@ -1,20 +1,23 @@
-# Relevé automatique des statistiques : chaque jour, GitHub lance stats-bunny.py, qui lit les journaux de Bunny,
-# met à jour les totaux (stats.json) et le rapport (index.html), puis les enregistre dans ce dépôt.
-# Le rapport s'affiche ensuite à l'adresse GitHub Pages du dépôt (Settings > Pages).
+# Relevé automatique des statistiques : GitHub lance stats-bunny.py, qui lit les journaux de Bunny, met à jour les
+# totaux (stats.json) et le rapport (index.html), puis les enregistre dans ce dépôt.
+# Il faut avoir créé 3 « Secrets » : BUNNY_API_KEY, BUNNY_PULLZONE_ID, MAPT_STATS_SALT (voir LISEZMOI.md).
 #
-# Il faut avoir créé 3 « Secrets » dans Settings > Secrets and variables > Actions :
-#   BUNNY_API_KEY       la clé d'accès Bunny (Account settings > API Keys)
-#   BUNNY_PULLZONE_ID   le numéro de ta zone Bunny
-#   MAPT_STATS_SALT     un texte quelconque, long et secret (sert à rendre les empreintes de visiteurs irréversibles)
+# REMISE À ZÉRO : onglet Actions > Relevé des statistiques > Run workflow, puis taper REMISE A ZERO dans la case.
+# Laissée vide, la case ne change rien : c'est un relevé normal.
 name: Relevé des statistiques
 
 on:
   schedule:
-       - cron: '47 5,13,21 * * *'        # 3 fois par jour : 05h47, 13h47 et 21h47 (heure UTC)
-  workflow_dispatch:          # permet aussi de le lancer à la main : onglet Actions > Run workflow
+    - cron: '47 5,13,21 * * *'   # 3 fois par jour (05h47, 13h47, 21h47 UTC) : si GitHub en retarde ou en saute un, le suivant rattrape
+  workflow_dispatch:
+    inputs:
+      remise_a_zero:
+        description: 'LAISSER VIDE pour un relevé normal. Pour EFFACER toutes les statistiques, taper exactement : REMISE A ZERO'
+        required: false
+        default: ''
 
 permissions:
-  contents: write             # pour enregistrer les nouveaux totaux dans le dépôt
+  contents: write
 
 concurrency:
   group: releve-stats
@@ -27,14 +30,20 @@ jobs:
       - name: Récupérer le dépôt
         uses: actions/checkout@v5
 
-      - name: Relever les journaux Bunny et fabriquer le rapport
+      - name: Relever les journaux Bunny et fabriquer le rapport (ou remettre à zéro)
         env:
           BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
           BUNNY_PULLZONE_ID: ${{ secrets.BUNNY_PULLZONE_ID }}
           MAPT_STATS_SALT: ${{ secrets.MAPT_STATS_SALT }}
           MAPT_STATS_DIR: ${{ github.workspace }}
           MAPT_REPORT_NAME: index.html
-        run: python3 stats-bunny.py --sans-ouvrir
+          REMISE: ${{ github.event.inputs.remise_a_zero }}
+        run: |
+          if [ -n "$REMISE" ]; then
+            python3 stats-bunny.py --sans-ouvrir --remise-a-zero --confirmer "$REMISE"
+          else
+            python3 stats-bunny.py --sans-ouvrir
+          fi
 
       - name: Enregistrer les nouveaux totaux
         run: |
