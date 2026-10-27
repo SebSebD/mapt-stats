@@ -15,6 +15,7 @@ UTILISATION (Terminal, dans le dossier qui contient ce script)
     python3 stats-bunny.py --sans-ouvrir    idem, sans ouvrir le rapport (pour une exécution automatique)
     python3 stats-bunny.py --rapport    refait seulement le rapport avec les données déjà enregistrées
     python3 stats-bunny.py --demo       montre un rapport d'EXEMPLE (données inventées) pour voir à quoi ça ressemble
+    python3 stats-bunny.py --remise-a-zero    EFFACE tous les totaux (demande de taper REMISE A ZERO pour confirmer)
 
 IMPORTANT : Bunny ne garde ses journaux que 3 JOURS. Lance le script au moins tous les 3 jours (idéalement
 chaque jour), sinon les visites de la période manquante sont perdues.
@@ -367,6 +368,68 @@ def update_from_bunny(cfg, state, tz):
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# REMISE À ZÉRO
+# ----------------------------------------------------------------------------------------------------------------
+RESET_PHRASE = 'REMISE A ZERO'
+
+
+def mark_existing_as_seen(cfg, state):
+    """Relève les demandes déjà présentes dans les journaux de Bunny (3 jours) et les marque « déjà vues » SANS les
+    compter : après la remise à zéro, seules les visites NOUVELLES seront comptées."""
+    now_s = time.time()
+    entries = fetch_beacon_logs(cfg, now_s - LOG_WINDOW_DAYS * 24 * 3600, now_s)
+    n = 0
+    for entry in entries:
+        rid = entry.get('requestId') or ''
+        ts = parse_ts(entry.get('timestamp'))
+        if rid and ts is not None:
+            state['seen'][rid] = ts
+            n += 1
+    return n
+
+
+def cmd_reset(confirmation, tz):
+    """Efface tous les totaux, après confirmation. `confirmation` : mot tapé (ou None : on le demande)."""
+    if confirmation is None:
+        print('ATTENTION : cette commande EFFACE définitivement tous les totaux (visites, pages, vidéos, pays...).')
+        print('Seules les visites faites APRÈS la remise à zéro seront comptées.')
+        try:
+            confirmation = input('Pour confirmer, tape exactement  %s  (toute autre réponse annule) : ' % RESET_PHRASE)
+        except EOFError:
+            confirmation = ''
+    if (confirmation or '').strip().upper() != RESET_PHRASE:
+        print('Confirmation incorrecte : RIEN n\'a été effacé.')
+        sys.exit(1)
+
+    state = load_json(STATE_FILE, None) or new_state()
+    cfg = load_config()
+    marked = None
+    if cfg.get('api_key') and cfg.get('pullzone_id'):
+        try:
+            marked = mark_existing_as_seen(cfg, state)
+        except BunnyError as e:
+            print('Attention : impossible de lire les journaux de Bunny (%s).' % e)
+    else:
+        print('Attention : clé ou numéro de zone Bunny absents.')
+    if marked is None:
+        print('Les visites des dernières heures encore présentes chez Bunny pourraient être recomptées au prochain relevé.')
+
+    n_days = len(state.get('days', {}))
+    state['days'] = {}
+    state['bots_ignored'] = 0
+    state['beacon_errors'] = 0
+    state['last_ts'] = now_ms()
+    state['updated'] = dt.datetime.now(tz).strftime('%Y-%m-%d %H:%M')
+    state['reset_at'] = state['updated']
+    prune_state(state, tz)
+    save_json(STATE_FILE, state)
+    build_report(state, REPORT_FILE)
+    print('Remise à zéro effectuée : %d jour(s) de statistiques effacé(s)%s.' % (
+        n_days, '' if marked is None else ', %d visite(s) déjà présente(s) chez Bunny ignorée(s)' % marked))
+    print('Rapport : %s' % REPORT_FILE)
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # RAPPORT
 # ----------------------------------------------------------------------------------------------------------------
 REPORT_TEMPLATE = r'''<!DOCTYPE html>
@@ -404,6 +467,18 @@ REPORT_TEMPLATE = r'''<!DOCTYPE html>
   .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
   .legend .a::before { background: #4ea1ef; } .legend .c::before { background: #6fcf8d; }
   .note { color: #888; font-size: 13px; margin-top: 18px; }
+  .reset { margin-top: 18px; text-align: right; }
+  .reset button { background: transparent; color: #c98a8a; border: 1px solid #5a3a3a; border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer; }
+  .reset button:hover { background: #2a1717; color: #f0b0b0; }
+  #dlg { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: none; align-items: center; justify-content: center; padding: 18px; z-index: 10; }
+  #dlg.open { display: flex; }
+  #dlg .box { background: #1b1b1b; border: 1px solid #444; border-radius: 12px; max-width: 560px; padding: 22px 24px; }
+  #dlg h2 { color: #f0b0b0; }
+  #dlg ol { padding-left: 20px; margin: 10px 0; }
+  #dlg code { background: #101010; border: 1px solid #333; border-radius: 5px; padding: 2px 6px; font-size: 13px; }
+  #dlg .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+  #dlg .row a, #dlg .row button { background: #2a2a2a; color: #fff; border: 1px solid #555; border-radius: 8px; padding: 8px 14px; font-size: 14px; cursor: pointer; text-decoration: none; }
+  #dlg .row a.go { background: #8a2f2f; border-color: #8a2f2f; font-weight: bold; }
   .warn { background: #3a2a10; border: 1px solid #7a5a20; color: #f3d9a4; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px; }
 </style>
 </head>
@@ -423,6 +498,16 @@ REPORT_TEMPLATE = r'''<!DOCTYPE html>
     <div class="card"><h2>Pays des visiteurs</h2><div id="t-countries"></div></div>
     <div class="card"><h2>Autres actions</h2><div id="t-actions"></div></div>
   </div>
+  <div class="reset"><button id="resetBtn" type="button">Remettre à zéro…</button></div>
+  <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgT"><div class="box">
+    <h2 id="dlgT">Remettre les statistiques à zéro</h2>
+    <p>Tous les totaux (visites, pages vues, vidéos, pays, provenance) seront <b>effacés définitivement</b>. Seules les visites faites
+    <b>après</b> la remise à zéro seront comptées.</p>
+    <p>Cette page est publique : elle ne peut pas effacer elle-même (sinon n'importe qui pourrait le faire). L'effacement se fait sur
+    <b>GitHub</b>, où il faut taper un mot de confirmation :</p>
+    <div id="dlgSteps"></div>
+    <div class="row"><button id="dlgNo" type="button">Annuler</button><span id="dlgGo"></span></div>
+  </div></div>
   <p class="note">Chiffres approximatifs. « Visite » = une arrivée sur le site (une page ouverte ou rechargée). « Visiteurs différents » =
   estimation par jour à partir de l'adresse IP anonymisée et du navigateur : le même visiteur revenu un autre jour est recompté, et
   plusieurs personnes derrière une même connexion peuvent n'en faire qu'une. Les robots connus sont écartés. Un bloqueur de publicité
@@ -516,6 +601,30 @@ function render(){
 }
 
 el('upd').textContent = DATA.updated || '—';
+if (DATA.reset_at) el('upd').insertAdjacentHTML('afterend', ' · compteurs remis à zéro le <b>' + esc(DATA.reset_at) + '</b>');
+
+// Remise à zéro : confirmation avant d'ouvrir la page GitHub où le mot de confirmation est à taper
+function actionsUrl() {
+  var h = location.hostname;
+  if (!/\.github\.io$/.test(h)) return '';
+  var repo = location.pathname.split('/').filter(Boolean)[0] || '';
+  return repo ? 'https://github.com/' + h.split('.')[0] + '/' + repo + '/actions/workflows/stats.yml' : '';
+}
+function closeDlg() { el('dlg').className = ''; }
+el('resetBtn').onclick = function () {
+  var url = actionsUrl();
+  el('dlgSteps').innerHTML = url
+    ? '<ol><li>Clique sur « Ouvrir la page des relevés » ci-dessous (elle s\'ouvre sur GitHub).</li>' +
+      '<li>Clique sur <b>Run workflow</b> (à droite).</li>' +
+      '<li>Dans la case, tape exactement : <code>REMISE A ZERO</code></li>' +
+      '<li>Clique sur le bouton vert <b>Run workflow</b>, attends 30 secondes, puis recharge ce rapport.</li></ol>'
+    : '<p>Dans le Terminal, sur ton Mac :</p><p><code>python3 stats-bunny.py --remise-a-zero</code></p><p>Le script te demandera de taper <code>REMISE A ZERO</code> pour confirmer.</p>';
+  el('dlgGo').innerHTML = url ? '<a class="go" target="_blank" rel="noopener" href="' + url + '">Ouvrir la page des relevés</a>' : '';
+  el('dlg').className = 'open';
+};
+el('dlgNo').onclick = closeDlg;
+el('dlg').onclick = function (e) { if (e.target === el('dlg')) closeDlg(); };
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDlg(); });
 if (/^\d{4}-\d\d-\d\d \d\d:\d\d$/.test(DATA.updated || '')) {
   var age = (Date.now() - new Date(DATA.updated.replace(' ', 'T')).getTime()) / 86400000;
   if (age > 2) el('warn').innerHTML += '<div class="warn">Dernier relevé il y a ' + Math.floor(age) + ' jours. Bunny ne garde ses journaux que 3 jours : si le relevé automatique est arrêté, des visites sont perdues. Relance le relevé (sur GitHub : onglet Actions, réactive le workflow puis « Run workflow »).</div>';
@@ -539,6 +648,7 @@ def build_report(state, path, demo=False):
         days[day] = {k: v for k, v in rec.items() if k != 'vset'}
     data = {'days': days, 'updated': ('EXEMPLE — données inventées' if demo else state.get('updated')),
             'beacon_errors': 0 if demo else state.get('beacon_errors', 0),
+            'reset_at': None if demo else state.get('reset_at'),
             'names': {'pages': NOMS_PAGES, 'countries': NOMS_PAYS}}
     payload = json.dumps(data, ensure_ascii=False).replace('<', '\\u003c')   # évite de fermer la balise <script>
     html = REPORT_TEMPLATE.replace('__DATA__', payload)
@@ -620,11 +730,16 @@ def main():
     ap.add_argument('--rapport', action='store_true', help='refait le rapport sans interroger Bunny')
     ap.add_argument('--demo', action='store_true', help='rapport d\'exemple avec des données inventées')
     ap.add_argument('--sans-ouvrir', action='store_true', help='n\'ouvre pas le rapport dans le navigateur')
+    ap.add_argument('--remise-a-zero', action='store_true', help='EFFACE tous les totaux (confirmation demandée)')
+    ap.add_argument('--confirmer', default=None, help='mot de confirmation, pour une exécution automatique (sinon il est demandé)')
     args = ap.parse_args()
     tz = get_tz()
 
     if args.init:
         cmd_init()
+        return
+    if args.remise_a_zero:
+        cmd_reset(args.confirmer, tz)
         return
     if args.demo:
         demo_file = DATA_DIR / 'rapport-EXEMPLE.html'
